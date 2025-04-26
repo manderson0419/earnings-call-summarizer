@@ -47,21 +47,31 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.3,
-            timeout=60  # set a timeout to avoid hanging
-        )
-        summary = response.choices[0].message.content
-        return summary
-    except Exception as e:
-        print(f"Warning: OpenAI Summarization Error: {e}")
-        return "Warning: Failed to summarize due to error."
+    CHUNK_SIZE = 4000  # characters per chunk
+    chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    print(f"Splitting into {len(chunks)} chunks for summarization...")
+
+    combined_summary = ""
+
+    for idx, chunk in enumerate(chunks):
+        print(f"Summarizing chunk {idx+1}/{len(chunks)}...")
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": chunk}
+                ],
+                temperature=0.3,
+                timeout=60
+            )
+            chunk_summary = response.choices[0].message.content
+            combined_summary += f"\n\n{chunk_summary}"
+        except Exception as e:
+            print(f"Warning: Error summarizing chunk {idx+1}: {e}")
+            combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
+
+    return combined_summary.strip()
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -130,3 +140,4 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
+
