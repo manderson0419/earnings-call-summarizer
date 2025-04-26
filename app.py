@@ -8,6 +8,7 @@ import fitz  # PyMuPDF
 from googleapiclient.http import MediaIoBaseDownload
 import json
 import time
+import tiktoken
 
 app = Flask(__name__)
 
@@ -17,10 +18,10 @@ openai.api_key = os.environ['OPENAI_API_KEY']
 # Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
-# Debounce lock
-is_processing = False
+# Initialize global debounce
+is_summarizing = False
 
-
+# Function to get Drive service
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
     creds = service_account.Credentials.from_service_account_info(
@@ -29,7 +30,13 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
+# Function to count tokens using tiktoken
+def count_tokens(text, model='gpt-4o'):
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(text)
+    return len(tokens)
 
+# Summarize function
 def summarize_text(text):
     system_prompt = (
         "You are a professional financial analyst AI assistant. "
@@ -53,8 +60,22 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    CHUNK_SIZE = 9000  # characters per chunk
-    chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    # Chunk by ~9000 tokens
+    CHUNK_TOKEN_SIZE = 9000
+    tokens = count_tokens(text)
+    print(f"Total tokens in text: {tokens}")
+
+    chunks = []
+    current_chunk = ""
+    for paragraph in text.split('\n'):
+        if count_tokens(current_chunk + paragraph) > CHUNK_TOKEN_SIZE:
+            chunks.append(current_chunk)
+            current_chunk = paragraph
+        else:
+            current_chunk += paragraph + "\n"
+    if current_chunk:
+        chunks.append(current_chunk)
+
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
     combined_summary = ""
@@ -71,24 +92,26 @@ def summarize_text(text):
                         {"role": "user", "content": chunk}
                     ],
                     temperature=0.3,
-                    timeout=90
+                    timeout=60
                 )
                 chunk_summary = response.choices[0].message.content
                 combined_summary += f"\n\n{chunk_summary}"
-                break  # Break if success
+                print(f"Finished chunk {idx+1}, sleeping 25s to avoid rate limit...")
+                time.sleep(25)
+                break  # exit retry loop if success
             except openai.RateLimitError as e:
-                retry_after = int(e.response.headers.get("Retry-After", 20))
+                retry_after = int(e.response.headers.get('Retry-After', 45))
                 retries += 1
                 print(f"Rate limit error (retry {retries}). Waiting {retry_after} seconds...")
                 time.sleep(retry_after)
             except Exception as e:
-                print(f"Warning: Error summarizing chunk {idx+1}: {e}")
-                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
-                break
+                retries += 1
+                print(f"Error summarizing chunk {idx+1}: {e}. Retrying...")
+                time.sleep(30)
 
     return combined_summary.strip()
 
-
+# Extract text from PDF
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
     text = ""
@@ -96,20 +119,20 @@ def extract_text_from_pdf(file_path):
         text += page.get_text()
     return text
 
-
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global is_processing
+    global is_summarizing
 
-    if is_processing:
+    if is_summarizing:
         print("Another summarization is already in progress. Skipping this webhook.")
         return '', 200
 
-    is_processing = True
-    try:
-        print("Received a webhook notification.")
-        print("Request headers:", request.headers)
+    print("Received a webhook notification.")
+    print("Request headers:", request.headers)
 
+    is_summarizing = True
+    try:
         service = get_drive_service()
 
         results = service.files().list(
@@ -140,33 +163,30 @@ def webhook():
 
             print(f"Downloaded file: {file_name}")
 
-            try:
-                if file_name.endswith('.pdf'):
-                    print("Detected PDF, extracting text...")
-                    file_contents = extract_text_from_pdf(file_name)
-                else:
-                    print("Detected text file, reading contents...")
-                    with open(file_name, 'r', encoding='utf-8') as f:
-                        file_contents = f.read()
+            if file_name.endswith('.pdf'):
+                print("Detected PDF, extracting text...")
+                file_contents = extract_text_from_pdf(file_name)
+            else:
+                print("Detected text file, reading contents...")
+                with open(file_name, 'r', encoding='utf-8') as f:
+                    file_contents = f.read()
 
-                print(f"Text length: {len(file_contents)} characters")
+            print(f"Text length: {len(file_contents)} characters")
 
-                # Summarize the contents
-                print("Summarizing file...")
-                summary = summarize_text(file_contents)
+            # Summarize
+            print("Summarizing file...")
+            summary = summarize_text(file_contents)
 
-                # Print the summary
-                print("\nSUMMARY (Ready for Slack):")
-                print(summary)
+            print("\nSUMMARY (Ready for Slack):")
+            print(summary)
 
-            except Exception as e:
-                print(f"Warning: Could not read or summarize the file: {e}")
+    except Exception as e:
+        print(f"Error during summarization flow: {e}")
 
     finally:
-        is_processing = False
+        is_summarizing = False
 
     return '', 200
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
