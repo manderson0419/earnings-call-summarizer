@@ -5,9 +5,9 @@ import os
 import io
 import openai
 import fitz  # PyMuPDF
-from googleapiclient.http import MediaIoBaseDownload
-import json
 import time
+import json
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
@@ -48,7 +48,7 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    CHUNK_SIZE = 36000  # About 9000 tokens
+    CHUNK_SIZE = 36000  # ~9k tokens worth of characters
     chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
@@ -56,9 +56,10 @@ def summarize_text(text):
 
     for idx, chunk in enumerate(chunks):
         print(f"Summarizing chunk {idx+1}/{len(chunks)}...")
+        retries = 0
         success = False
 
-        while not success:
+        while not success and retries < 8:
             try:
                 response = client.chat.completions.create(
                     model="gpt-4o",
@@ -72,16 +73,27 @@ def summarize_text(text):
                 chunk_summary = response.choices[0].message.content
                 combined_summary += f"\n\n{chunk_summary}"
                 success = True
+                print(f"Finished chunk {idx+1}")
+
+                if idx < len(chunks) - 1:
+                    print("Waiting 25 seconds before next chunk...")
+                    time.sleep(25)
+
+            except openai.RateLimitError as e:
+                retries += 1
+                wait_time = 45
+                print(f"Rate limit error (retry {retries}). Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+
             except Exception as e:
-                print(f"Warning: Error summarizing chunk {idx+1}: {e}")
-                print("Waiting 25 seconds before retrying...")
-                time.sleep(25)
+                retries += 1
+                wait_time = 45
+                print(f"Unexpected error (retry {retries}): {e}")
+                print(f"Waiting {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
 
-        print(f"Finished chunk {idx+1}")
-
-        if idx < len(chunks) - 1:
-            print("Waiting 21 seconds before next chunk...")
-            time.sleep(21)
+        if not success:
+            print(f"Failed to summarize chunk {idx+1} after {retries} retries. Skipping.")
 
     return combined_summary.strip()
 
@@ -116,12 +128,13 @@ def webhook():
         file_name = file['name']
         print(f"Newest file: {file_name} (ID: {file_id})")
 
+        # Download the file
         request_drive = service.files().get_media(fileId=file_id)
         fh = io.FileIO(file_name, 'wb')
         downloader = MediaIoBaseDownload(fh, request_drive)
 
         done = False
-        while not done:
+        while done is False:
             status, done = downloader.next_chunk()
 
         print(f"Downloaded file: {file_name}")
@@ -137,9 +150,11 @@ def webhook():
 
             print(f"Text length: {len(file_contents)} characters")
 
+            # Summarize the contents
             print("Summarizing file...")
             summary = summarize_text(file_contents)
 
+            # Print the summary
             print("\nSUMMARY (Ready for Slack):")
             print(summary)
         except Exception as e:
@@ -149,4 +164,3 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
-
