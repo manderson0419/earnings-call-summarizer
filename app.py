@@ -60,8 +60,8 @@ def summarize_text(text):
         summary = response.choices[0].message.content
         return summary
     except Exception as e:
-        print(f"\u26a0\ufe0f OpenAI Summarization Error: {e}")
-        return "\u26a0\ufe0f Failed to summarize due to error."
+        print(f"Warning: OpenAI Summarization Error: {e}")
+        return "Warning: Failed to summarize due to error."
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -72,7 +72,7 @@ def extract_text_from_pdf(file_path):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    print("=== Received a webhook notification ===")
+    print("Received a webhook notification.")
     print("Request headers:", request.headers)
 
     service = get_drive_service()
@@ -87,12 +87,12 @@ def webhook():
     items = results.get('files', [])
 
     if not items:
-        print('\u26a0\ufe0f No files found in the folder.')
+        print('Warning: No files found in the folder.')
     else:
         file = items[0]
         file_id = file['id']
         file_name = file['name']
-        print(f"\ud83d\udcc4 Newest file: {file_name} (ID: {file_id})")
+        print(f"Newest file: {file_name} (ID: {file_id})")
 
         # Download the file
         request_drive = service.files().get_media(fileId=file_id)
@@ -103,28 +103,28 @@ def webhook():
         while done is False:
             status, done = downloader.next_chunk()
 
-        print(f"\u2705 Downloaded file: {file_name}")
+        print(f"Downloaded file: {file_name}")
 
         try:
             if file_name.endswith('.pdf'):
-                print("\ud83d\udcc4 Detected PDF, extracting text...")
+                print("Detected PDF, extracting text...")
                 file_contents = extract_text_from_pdf(file_name)
             else:
-                print("\ud83d\udcc4 Detected text file, reading contents...")
+                print("Detected text file, reading contents...")
                 with open(file_name, 'r', encoding='utf-8') as f:
                     file_contents = f.read()
 
-            print(f"\ud83d\udd22 Text length: {len(file_contents)} characters")
+            print(f"Text length: {len(file_contents)} characters")
 
             # Summarize the contents
-            print("\u2728 Summarizing file...")
+            print("Summarizing file...")
             summary = summarize_text(file_contents)
 
             # Print the summary
-            print("\n\ud83d\udccb SUMMARY (Ready for Slack):")
+            print("\nSUMMARY (Ready for Slack):")
             print(summary)
         except Exception as e:
-            print(f"\u26a0\ufe0f Could not read or summarize the file: {e}")
+            print(f"Warning: Could not read or summarize the file: {e}")
 
     return '', 200
 
