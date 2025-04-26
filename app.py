@@ -5,9 +5,9 @@ import os
 import io
 import openai
 import fitz  # PyMuPDF
-import time
-import json
 from googleapiclient.http import MediaIoBaseDownload
+import json
+import time
 
 app = Flask(__name__)
 
@@ -48,7 +48,7 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    CHUNK_SIZE = 36000  # ~9k tokens worth of characters
+    CHUNK_SIZE = 36000  # characters (~9k tokens)
     chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
@@ -81,16 +81,19 @@ def summarize_text(text):
 
             except openai.RateLimitError as e:
                 retries += 1
-                wait_time = 45
-                print(f"Rate limit error (retry {retries}). Waiting {wait_time} seconds...")
-                time.sleep(wait_time)
+                retry_after = 60  # Default fallback wait
+                if hasattr(e, 'response') and e.response is not None:
+                    retry_after_header = e.response.headers.get('Retry-After')
+                    if retry_after_header:
+                        retry_after = int(retry_after_header)
+                print(f"Rate limit error (retry {retries}). Waiting {retry_after} seconds...")
+                time.sleep(retry_after)
 
             except Exception as e:
                 retries += 1
-                wait_time = 45
                 print(f"Unexpected error (retry {retries}): {e}")
-                print(f"Waiting {wait_time} seconds before retrying...")
-                time.sleep(wait_time)
+                print("Waiting 60 seconds before retrying...")
+                time.sleep(60)
 
         if not success:
             print(f"Failed to summarize chunk {idx+1} after {retries} retries. Skipping.")
@@ -128,7 +131,6 @@ def webhook():
         file_name = file['name']
         print(f"Newest file: {file_name} (ID: {file_id})")
 
-        # Download the file
         request_drive = service.files().get_media(fileId=file_id)
         fh = io.FileIO(file_name, 'wb')
         downloader = MediaIoBaseDownload(fh, request_drive)
@@ -150,13 +152,12 @@ def webhook():
 
             print(f"Text length: {len(file_contents)} characters")
 
-            # Summarize the contents
             print("Summarizing file...")
             summary = summarize_text(file_contents)
 
-            # Print the summary
             print("\nSUMMARY (Ready for Slack):")
             print(summary)
+
         except Exception as e:
             print(f"Warning: Could not read or summarize the file: {e}")
 
