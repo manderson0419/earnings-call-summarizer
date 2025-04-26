@@ -12,9 +12,6 @@ app = Flask(__name__)
 # Set your OpenAI API key here
 openai.api_key = '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'
 
-# Service account JSON path
-SERVICE_ACCOUNT_FILE = '/Users/michaelaanderson/Downloads/tidy-centaur-457916-h9-2230742befee.json'
-
 # Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
