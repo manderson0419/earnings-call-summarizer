@@ -17,6 +17,10 @@ openai.api_key = os.environ['OPENAI_API_KEY']
 # Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
+# Debounce lock
+is_processing = False
+
+
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
     creds = service_account.Credentials.from_service_account_info(
@@ -24,6 +28,7 @@ def get_drive_service():
         scopes=['https://www.googleapis.com/auth/drive']
     )
     return build('drive', 'v3', credentials=creds)
+
 
 def summarize_text(text):
     system_prompt = (
@@ -48,7 +53,7 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    CHUNK_SIZE = 36000  # characters (~9k tokens)
+    CHUNK_SIZE = 9000  # characters per chunk
     chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
@@ -57,9 +62,7 @@ def summarize_text(text):
     for idx, chunk in enumerate(chunks):
         print(f"Summarizing chunk {idx+1}/{len(chunks)}...")
         retries = 0
-        success = False
-
-        while not success and retries < 8:
+        while retries < 5:
             try:
                 response = client.chat.completions.create(
                     model="gpt-4o",
@@ -72,33 +75,19 @@ def summarize_text(text):
                 )
                 chunk_summary = response.choices[0].message.content
                 combined_summary += f"\n\n{chunk_summary}"
-                success = True
-                print(f"Finished chunk {idx+1}")
-
-                if idx < len(chunks) - 1:
-                    print("Waiting 25 seconds before next chunk...")
-                    time.sleep(25)
-
+                break  # Break if success
             except openai.RateLimitError as e:
+                retry_after = int(e.response.headers.get("Retry-After", 20))
                 retries += 1
-                retry_after = 60  # Default fallback wait
-                if hasattr(e, 'response') and e.response is not None:
-                    retry_after_header = e.response.headers.get('Retry-After')
-                    if retry_after_header:
-                        retry_after = int(retry_after_header)
                 print(f"Rate limit error (retry {retries}). Waiting {retry_after} seconds...")
                 time.sleep(retry_after)
-
             except Exception as e:
-                retries += 1
-                print(f"Unexpected error (retry {retries}): {e}")
-                print("Waiting 60 seconds before retrying...")
-                time.sleep(60)
-
-        if not success:
-            print(f"Failed to summarize chunk {idx+1} after {retries} retries. Skipping.")
+                print(f"Warning: Error summarizing chunk {idx+1}: {e}")
+                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
+                break
 
     return combined_summary.strip()
+
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -107,61 +96,77 @@ def extract_text_from_pdf(file_path):
         text += page.get_text()
     return text
 
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    print("Received a webhook notification.")
-    print("Request headers:", request.headers)
+    global is_processing
 
-    service = get_drive_service()
+    if is_processing:
+        print("Another summarization is already in progress. Skipping this webhook.")
+        return '', 200
 
-    results = service.files().list(
-        q=f"'{FOLDER_ID}' in parents and trashed = false",
-        fields="files(id, name, createdTime, modifiedTime)",
-        orderBy="modifiedTime desc",
-        pageSize=1
-    ).execute()
+    is_processing = True
+    try:
+        print("Received a webhook notification.")
+        print("Request headers:", request.headers)
 
-    items = results.get('files', [])
+        service = get_drive_service()
 
-    if not items:
-        print('Warning: No files found in the folder.')
-    else:
-        file = items[0]
-        file_id = file['id']
-        file_name = file['name']
-        print(f"Newest file: {file_name} (ID: {file_id})")
+        results = service.files().list(
+            q=f"'{FOLDER_ID}' in parents and trashed = false",
+            fields="files(id, name, createdTime, modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=1
+        ).execute()
 
-        request_drive = service.files().get_media(fileId=file_id)
-        fh = io.FileIO(file_name, 'wb')
-        downloader = MediaIoBaseDownload(fh, request_drive)
+        items = results.get('files', [])
 
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
+        if not items:
+            print('Warning: No files found in the folder.')
+        else:
+            file = items[0]
+            file_id = file['id']
+            file_name = file['name']
+            print(f"Newest file: {file_name} (ID: {file_id})")
 
-        print(f"Downloaded file: {file_name}")
+            # Download the file
+            request_drive = service.files().get_media(fileId=file_id)
+            fh = io.FileIO(file_name, 'wb')
+            downloader = MediaIoBaseDownload(fh, request_drive)
 
-        try:
-            if file_name.endswith('.pdf'):
-                print("Detected PDF, extracting text...")
-                file_contents = extract_text_from_pdf(file_name)
-            else:
-                print("Detected text file, reading contents...")
-                with open(file_name, 'r', encoding='utf-8') as f:
-                    file_contents = f.read()
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
 
-            print(f"Text length: {len(file_contents)} characters")
+            print(f"Downloaded file: {file_name}")
 
-            print("Summarizing file...")
-            summary = summarize_text(file_contents)
+            try:
+                if file_name.endswith('.pdf'):
+                    print("Detected PDF, extracting text...")
+                    file_contents = extract_text_from_pdf(file_name)
+                else:
+                    print("Detected text file, reading contents...")
+                    with open(file_name, 'r', encoding='utf-8') as f:
+                        file_contents = f.read()
 
-            print("\nSUMMARY (Ready for Slack):")
-            print(summary)
+                print(f"Text length: {len(file_contents)} characters")
 
-        except Exception as e:
-            print(f"Warning: Could not read or summarize the file: {e}")
+                # Summarize the contents
+                print("Summarizing file...")
+                summary = summarize_text(file_contents)
+
+                # Print the summary
+                print("\nSUMMARY (Ready for Slack):")
+                print(summary)
+
+            except Exception as e:
+                print(f"Warning: Could not read or summarize the file: {e}")
+
+    finally:
+        is_processing = False
 
     return '', 200
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
