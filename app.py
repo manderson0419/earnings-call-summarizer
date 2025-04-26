@@ -18,9 +18,12 @@ SERVICE_ACCOUNT_FILE = '/Users/michaelaanderson/Downloads/tidy-centaur-457916-h9
 # Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
+import json
+
 def get_drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
+    credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+    creds = service_account.Credentials.from_service_account_info(
+        credentials_info,
         scopes=['https://www.googleapis.com/auth/drive']
     )
     return build('drive', 'v3', credentials=creds)
