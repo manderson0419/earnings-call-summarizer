@@ -10,7 +10,7 @@ from googleapiclient.http import MediaIoBaseDownload
 app = Flask(__name__)
 
 # Set your OpenAI API key here
-openai.api_key = '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'
+openai.api_key = os.environ['OPENAI_API_KEY']
 
 # Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
@@ -46,7 +46,7 @@ def summarize_text(text):
         "Process the following transcript and output accordingly:\n\n"
     )
 
-    client = openai.OpenAI(api_key='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')
+    client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
     response = client.chat.completions.create(
         model="gpt-4o",
