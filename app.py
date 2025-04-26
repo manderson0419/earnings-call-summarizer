@@ -5,23 +5,47 @@ import os
 import io
 import openai
 import fitz  # PyMuPDF
-from googleapiclient.http import MediaIoBaseDownload
-import json
-import time
 import tiktoken
+import time
+import json
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
-# Set your OpenAI API key from environment variables
 openai.api_key = os.environ['OPENAI_API_KEY']
-
-# Folder ID to watch
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
-# Initialize global debounce
 is_summarizing = False
 
-# Function to get Drive service
+TOKEN_LIMIT_PER_REQUEST = 9000  # safe chunk size
+
+# Set up tokenizer
+tokenizer = tiktoken.encoding_for_model("gpt-4o")
+
+def count_tokens(text):
+    return len(tokenizer.encode(text))
+
+def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
+    words = text.split()
+    chunks = []
+    current_chunk = []
+    current_token_count = 0
+
+    for word in words:
+        token_count = len(tokenizer.encode(word + ' '))
+        if current_token_count + token_count > max_tokens:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [word]
+            current_token_count = token_count
+        else:
+            current_chunk.append(word)
+            current_token_count += token_count
+
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+
+    return chunks
+
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
     creds = service_account.Credentials.from_service_account_info(
@@ -30,13 +54,6 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
-# Function to count tokens using tiktoken
-def count_tokens(text, model='gpt-4o'):
-    encoding = tiktoken.encoding_for_model(model)
-    tokens = encoding.encode(text)
-    return len(tokens)
-
-# Summarize function
 def summarize_text(text):
     system_prompt = (
         "You are a professional financial analyst AI assistant. "
@@ -60,22 +77,7 @@ def summarize_text(text):
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    # Chunk by ~9000 tokens
-    CHUNK_TOKEN_SIZE = 9000
-    tokens = count_tokens(text)
-    print(f"Total tokens in text: {tokens}")
-
-    chunks = []
-    current_chunk = ""
-    for paragraph in text.split('\n'):
-        if count_tokens(current_chunk + paragraph) > CHUNK_TOKEN_SIZE:
-            chunks.append(current_chunk)
-            current_chunk = paragraph
-        else:
-            current_chunk += paragraph + "\n"
-    if current_chunk:
-        chunks.append(current_chunk)
-
+    chunks = split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST)
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
     combined_summary = ""
@@ -91,27 +93,25 @@ def summarize_text(text):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": chunk}
                     ],
-                    temperature=0.3,
-                    timeout=60
+                    temperature=0.3
                 )
                 chunk_summary = response.choices[0].message.content
                 combined_summary += f"\n\n{chunk_summary}"
-                print(f"Finished chunk {idx+1}, sleeping 25s to avoid rate limit...")
-                time.sleep(25)
-                break  # exit retry loop if success
+                break  # Success, break retry loop
             except openai.RateLimitError as e:
-                retry_after = int(e.response.headers.get('Retry-After', 45))
+                wait_time = 45  # default wait time
+                if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
+                    wait_time = int(e.response.headers['Retry-After'])
+                print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
                 retries += 1
-                print(f"Rate limit error (retry {retries}). Waiting {retry_after} seconds...")
-                time.sleep(retry_after)
             except Exception as e:
-                retries += 1
-                print(f"Error summarizing chunk {idx+1}: {e}. Retrying...")
-                time.sleep(30)
+                print(f"Warning: Error summarizing chunk {idx+1}: {e}")
+                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
+                break
 
     return combined_summary.strip()
 
-# Extract text from PDF
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
     text = ""
@@ -119,11 +119,9 @@ def extract_text_from_pdf(file_path):
         text += page.get_text()
     return text
 
-# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global is_summarizing
-
     if is_summarizing:
         print("Another summarization is already in progress. Skipping this webhook.")
         return '', 200
@@ -131,62 +129,59 @@ def webhook():
     print("Received a webhook notification.")
     print("Request headers:", request.headers)
 
-    is_summarizing = True
+    service = get_drive_service()
+
+    results = service.files().list(
+        q=f"'{FOLDER_ID}' in parents and trashed = false",
+        fields="files(id, name, createdTime, modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=1
+    ).execute()
+
+    items = results.get('files', [])
+
+    if not items:
+        print('Warning: No files found in the folder.')
+        return '', 200
+
+    file = items[0]
+    file_id = file['id']
+    file_name = file['name']
+    print(f"Newest file: {file_name} (ID: {file_id})")
+
     try:
-        service = get_drive_service()
+        request_drive = service.files().get_media(fileId=file_id)
+        fh = io.FileIO(file_name, 'wb')
+        downloader = MediaIoBaseDownload(fh, request_drive)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        print(f"Downloaded file: {file_name}")
 
-        results = service.files().list(
-            q=f"'{FOLDER_ID}' in parents and trashed = false",
-            fields="files(id, name, createdTime, modifiedTime)",
-            orderBy="modifiedTime desc",
-            pageSize=1
-        ).execute()
-
-        items = results.get('files', [])
-
-        if not items:
-            print('Warning: No files found in the folder.')
+        if file_name.endswith('.pdf'):
+            print("Detected PDF, extracting text...")
+            file_contents = extract_text_from_pdf(file_name)
         else:
-            file = items[0]
-            file_id = file['id']
-            file_name = file['name']
-            print(f"Newest file: {file_name} (ID: {file_id})")
+            print("Detected text file, reading contents...")
+            with open(file_name, 'r', encoding='utf-8') as f:
+                file_contents = f.read()
 
-            # Download the file
-            request_drive = service.files().get_media(fileId=file_id)
-            fh = io.FileIO(file_name, 'wb')
-            downloader = MediaIoBaseDownload(fh, request_drive)
+        print(f"Text length: {len(file_contents)} characters")
 
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
+        is_summarizing = True
+        print("Summarizing file...")
+        summary = summarize_text(file_contents)
+        is_summarizing = False
 
-            print(f"Downloaded file: {file_name}")
-
-            if file_name.endswith('.pdf'):
-                print("Detected PDF, extracting text...")
-                file_contents = extract_text_from_pdf(file_name)
-            else:
-                print("Detected text file, reading contents...")
-                with open(file_name, 'r', encoding='utf-8') as f:
-                    file_contents = f.read()
-
-            print(f"Text length: {len(file_contents)} characters")
-
-            # Summarize
-            print("Summarizing file...")
-            summary = summarize_text(file_contents)
-
-            print("\nSUMMARY (Ready for Slack):")
-            print(summary)
+        print("\nSUMMARY (Ready for Slack):")
+        print(summary)
 
     except Exception as e:
-        print(f"Error during summarization flow: {e}")
-
-    finally:
         is_summarizing = False
+        print(f"Warning: Could not process file: {e}")
 
     return '', 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
+
