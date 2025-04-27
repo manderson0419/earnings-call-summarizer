@@ -15,6 +15,7 @@ from googleapiclient.http import MediaIoBaseDownload
 app = Flask(__name__)
 
 openai.api_key = os.environ['OPENAI_API_KEY']
+SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
 is_summarizing = False
@@ -53,6 +54,14 @@ def clean_text(text):
     text = text.replace(' \n', '\n').replace('\n ', '\n')
     return text.strip()
 
+def get_drive_service():
+    credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+    creds = service_account.Credentials.from_service_account_info(
+        credentials_info,
+        scopes=['https://www.googleapis.com/auth/drive']
+    )
+    return build('drive', 'v3', credentials=creds)
+
 def format_for_slack(summary_text):
     formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
     formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
@@ -62,47 +71,22 @@ def format_for_slack(summary_text):
     formatted = formatted.replace("\n\n", "\n")
     return formatted.strip()
 
-def send_to_slack(message):
-    webhook_url = os.environ.get('SLACK_WEBHOOK_URL')
-    if not webhook_url:
-        print("Warning: No SLACK_WEBHOOK_URL found in environment variables.")
-        return
+def send_to_slack(message_text):
+    payload = {
+        "text": message_text
+    }
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(SLACK_WEBHOOK_URL, json=payload, headers=headers)
+    if response.status_code != 200:
+        print(f"Failed to send message to Slack: {response.status_code}, {response.text}")
+    else:
+        print("Successfully sent message to Slack!")
 
-    payload = {"text": message}
-
-    try:
-        response = requests.post(webhook_url, json=payload)
-        if response.status_code != 200:
-            print(f"Slack webhook error: {response.status_code} - {response.text}")
-        else:
-            print("✅ Successfully sent summary to Slack!")
-    except Exception as e:
-        print(f"Error sending to Slack: {e}")
-
-def get_drive_service():
-    credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
-    creds = service_account.Credentials.from_service_account_info(
-        credentials_info,
-        scopes=['https://www.googleapis.com/auth/drive']
-    )
-    return build('drive', 'v3', credentials=creds)
-
-def summarize_text(text):
+def summarize_chunks(chunks):
     system_prompt = (
-        "This GPT takes earnings call transcripts as input, processes the content to extract and generate key financial highlights, operational highlights, forward guidance, sentiment analysis, and a concise summary. "
-        "It must prepare a Slack-compatible message format to send the summaries to a designated Slack channel. "
-        "Summaries must be accurate, succinct, and formatted clearly for quick consumption by finance teams or executives.\n\n"
-        "Financial summaries must be written in 2 to 6 concise bullet points, each under 20 words. Key metrics such as revenue, earnings per share (EPS), and notable financial announcements must be included where available.\n"
-        "Use a format like:\n- Revenue: Increased by 15% year-over-year, reaching $5 million\n- EPS: Reported earnings per share of $1.25, exceeding analysts expectations\n- Announcement: New partnership expected to drive future growth\n\n"
-        "Avoid overly technical financial jargon unless present in the original text. Clearly distinguish between quantitative data and qualitative sentiment, labeling sections properly."
-        "When data is missing or ambiguous, indicate that rather than assume."
-        "Use professional, clear, and concise language in summaries, appropriate for finance and executive audiences."
+        "You are a professional financial analyst AI assistant. Summarize each chunk accordingly."
     )
-
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
-
-    chunks = split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST)
-    print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
     combined_summary = ""
 
@@ -131,10 +115,31 @@ def summarize_text(text):
                 retries += 1
             except Exception as e:
                 print(f"Warning: Error summarizing chunk {idx+1}: {e}")
-                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
                 break
 
     return combined_summary.strip()
+
+def summarize_combined_summary(combined_summary_text):
+    system_prompt = (
+        "You have received multiple partial summaries of an earnings call. "
+        "Please now combine them into one single cohesive and clean Slack-ready summary."
+    )
+    client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": combined_summary_text}
+            ],
+            temperature=0.2
+        )
+        final_summary = response.choices[0].message.content
+        return final_summary.strip()
+    except Exception as e:
+        print(f"Warning: Error during final summarization: {e}")
+        return combined_summary_text
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -195,15 +200,15 @@ def webhook():
 
         is_summarizing = True
         print("Summarizing file...")
-        summary = summarize_text(file_contents)
+
+        chunks = split_into_token_chunks(file_contents)
+        combined_summary = summarize_chunks(chunks)
+        final_summary = summarize_combined_summary(combined_summary)
+
+        slack_message = format_for_slack(final_summary)
+        send_to_slack(slack_message)
+
         is_summarizing = False
-
-        formatted_summary = format_for_slack(summary)
-
-        print("\nFormatted SUMMARY (Ready for Slack):")
-        print(formatted_summary)
-
-        send_to_slack(formatted_summary)
 
     except Exception as e:
         is_summarizing = False
