@@ -110,6 +110,23 @@ def summarize_text(text):
 
     return combined_summary.strip()
 
+def format_for_slack(summary_text):
+    """
+    Cleans and formats the generated summary to look great when posted to Slack.
+    """
+    # Replace section headings with bold
+    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
+    
+    # Optional: Replace other minor cleanups
+    formatted = formatted.replace("\n\n", "\n")  # remove double newlines
+    formatted = formatted.strip()
+
+    return formatted
+
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
     text = ""
@@ -173,7 +190,7 @@ def webhook():
         is_summarizing = False
 
         print("\nSUMMARY (Ready for Slack):")
-        print(summary)
+        print(format_for_slack(summary))
 
     except Exception as e:
         is_summarizing = False
