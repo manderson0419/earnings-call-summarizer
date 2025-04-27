@@ -48,11 +48,9 @@ def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
     return chunks
 
 def clean_unicode(text):
-    """Remove invalid unicode characters that cause errors."""
     return text.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
 
 def clean_text(text):
-    """Clean up excessive whitespace and fix newlines."""
     text = re.sub(r'\n+', '\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     text = text.replace(' \n', '\n').replace('\n ', '\n')
@@ -67,11 +65,11 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def format_for_slack(summary_text):
-    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
+    formatted = summary_text.replace("Key Financial Highlights:", "\ud83d\udcc8 *Key Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "\ud83d\udc69\u200d\ud83d\udcbc *Key Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "\ud83d\udd2e *Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "\ud83d\udcca *Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "\ud83d\udcd3 *Executive Summary:*")
     formatted = formatted.replace("\n\n", "\n")
     return formatted.strip()
 
@@ -113,7 +111,7 @@ def summarize_chunks(chunks):
             except openai.RateLimitError as e:
                 wait_time = 45
                 if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
-                    wait_time = int(e.response.headers['Retry-After'])
+                    wait_time = min(int(e.response.headers['Retry-After']), 120)
                 print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
                 retries += 1
@@ -125,8 +123,18 @@ def summarize_chunks(chunks):
 
 def summarize_combined_summary(combined_summary_text):
     system_prompt = (
-        "You have received multiple partial summaries of an earnings call. "
-        "Please now combine them into one single cohesive and clean Slack-ready summary."
+        "You are a professional financial analyst AI assistant.\n"
+        "You have received multiple partial summaries of an earnings call.\n"
+        "Your task is to combine them into a single cohesive final summary.\n\n"
+        "The final output must be:\n"
+        "- Structured into the following sections: Financial Highlights, Operational Highlights, Forward Guidance, Sentiment Analysis, Executive Summary.\n"
+        "- Each section must have concise bullet points (each under 20 words).\n"
+        "- Section titles must be bolded.\n"
+        "- Important metrics like Revenue, EPS, ARR should be bolded.\n"
+        "- Keep Slack-friendly formatting (no giant paragraphs, use bullets).\n"
+        "- Maintain a professional tone for executive audiences.\n"
+        "- If financial data is missing, say 'Data not available'.\n"
+        "Here is the text to combine and clean up:"
     )
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
@@ -146,7 +154,7 @@ def summarize_combined_summary(combined_summary_text):
         except openai.RateLimitError as e:
             wait_time = 45
             if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
-                wait_time = int(e.response.headers['Retry-After'])
+                wait_time = min(int(e.response.headers['Retry-After']), 120)
             print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
             time.sleep(wait_time)
             retries += 1
