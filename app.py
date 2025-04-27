@@ -15,13 +15,12 @@ from googleapiclient.http import MediaIoBaseDownload
 app = Flask(__name__)
 
 openai.api_key = os.environ['OPENAI_API_KEY']
+SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
-SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
 
 is_summarizing = False
 TOKEN_LIMIT_PER_REQUEST = 9000
 
-# Set up tokenizer
 tokenizer = tiktoken.encoding_for_model("gpt-4o")
 
 def count_tokens(text):
@@ -48,9 +47,14 @@ def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
 
     return chunks
 
+def clean_unicode(text):
+    """Remove invalid unicode characters that cause errors."""
+    return text.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
+
 def clean_text(text):
+    """Clean up excessive whitespace and fix newlines."""
     text = re.sub(r'\n+', '\n', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[ \t]+', ' ', text)
     text = text.replace(' \n', '\n').replace('\n ', '\n')
     return text.strip()
 
@@ -63,59 +67,30 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def format_for_slack(summary_text):
-    formatted = summary_text
-    formatted = formatted.replace("Key Financial Highlights:", "*\ud83d\udcca Key Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "*\ud83c\udfe2 Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "*\ud83d\udd2e Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "*\ud83d\udcc8 Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "*\ud83d\udd39 Executive Summary:*")
+    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
     formatted = formatted.replace("\n\n", "\n")
-    formatted = formatted.strip()
-    formatted = f"---\n{formatted}\n---"
-    return formatted
+    return formatted.strip()
 
-def post_to_slack(message):
-    if SLACK_WEBHOOK_URL:
-        response = requests.post(SLACK_WEBHOOK_URL, json={"text": message})
-        if response.status_code != 200:
-            print(f"Slack post failed: {response.status_code}, {response.text}")
-        else:
-            print("Slack post successful!")
+def send_to_slack(message_text):
+    payload = {
+        "text": message_text
+    }
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(SLACK_WEBHOOK_URL, json=payload, headers=headers)
+    if response.status_code != 200:
+        print(f"Failed to send message to Slack: {response.status_code}, {response.text}")
     else:
-        print("Slack Webhook URL not set.")
+        print("Successfully sent message to Slack!")
 
-def summarize_text(text):
-    system_prompt = """
-    You are a professional financial analyst AI assistant.
-    You take earnings call transcripts as input and generate:
-    - Key Financial Highlights
-    - Operational Highlights
-    - Forward Guidance
-    - Sentiment Analysis
-    - Executive Summary
-
-    Format the output for Slack:
-    - Use emojis like \ud83d\udcca, \ud83c\udfe2, \ud83d\udd2e, \ud83d\udcc8, \ud83d\udd39
-    - Use **bold** headers
-    - Separate sections with "---"
-    - Keep it clear, clean, and professional.
-
-    If key financial data is missing, say 'Data not available'.
-    Avoid making assumptions.
-
-    Extract:
-    - Revenue
-    - EPS
-    - ARR
-    - Free Cash Flow
-    - Notable customer metrics
-    - Executive sentiment and guidance
-    """
-
+def summarize_chunks(chunks):
+    system_prompt = (
+        "You are a professional financial analyst AI assistant. Summarize each chunk accordingly."
+    )
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
-
-    chunks = split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST)
-    print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
     combined_summary = ""
 
@@ -144,10 +119,40 @@ def summarize_text(text):
                 retries += 1
             except Exception as e:
                 print(f"Warning: Error summarizing chunk {idx+1}: {e}")
-                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
                 break
 
     return combined_summary.strip()
+
+def summarize_combined_summary(combined_summary_text):
+    system_prompt = (
+        "You have received multiple partial summaries of an earnings call. "
+        "Please now combine them into one single cohesive and clean Slack-ready summary."
+    )
+    client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+
+    retries = 0
+    while retries < 5:
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": combined_summary_text}
+                ],
+                temperature=0.2
+            )
+            final_summary = response.choices[0].message.content
+            return final_summary.strip()
+        except openai.RateLimitError as e:
+            wait_time = 45
+            if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
+                wait_time = int(e.response.headers['Retry-After'])
+            print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
+            time.sleep(wait_time)
+            retries += 1
+        except Exception as e:
+            print(f"Warning: Error during final summarization: {e}")
+            return combined_summary_text
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -203,14 +208,20 @@ def webhook():
             with open(file_name, 'r', encoding='utf-8') as f:
                 file_contents = f.read()
 
+        file_contents = clean_unicode(file_contents)
         file_contents = clean_text(file_contents)
         print(f"Text length after cleaning: {len(file_contents)} characters")
 
         is_summarizing = True
         print("Summarizing file...")
-        summary = summarize_text(file_contents)
-        formatted_summary = format_for_slack(summary)
-        post_to_slack(formatted_summary)
+
+        chunks = split_into_token_chunks(file_contents)
+        combined_summary = summarize_chunks(chunks)
+        final_summary = summarize_combined_summary(combined_summary)
+
+        slack_message = format_for_slack(final_summary)
+        send_to_slack(slack_message)
+
         is_summarizing = False
 
     except Exception as e:
