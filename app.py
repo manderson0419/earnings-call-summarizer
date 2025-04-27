@@ -15,8 +15,8 @@ from googleapiclient.http import MediaIoBaseDownload
 app = Flask(__name__)
 
 openai.api_key = os.environ['OPENAI_API_KEY']
-SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
+SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
 
 is_summarizing = False
 TOKEN_LIMIT_PER_REQUEST = 9000
@@ -62,31 +62,17 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
-def format_for_slack(summary_text):
-    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
-    formatted = formatted.replace("\n\n", "\n")
-    return formatted.strip()
-
-def send_to_slack(message_text):
-    payload = {
-        "text": message_text
-    }
-    headers = {'Content-Type': 'application/json'}
-    response = requests.post(SLACK_WEBHOOK_URL, json=payload, headers=headers)
-    if response.status_code != 200:
-        print(f"Failed to send message to Slack: {response.status_code}, {response.text}")
-    else:
-        print("Successfully sent message to Slack!")
-
-def summarize_chunks(chunks):
+def summarize_text(text):
     system_prompt = (
-        "You are a professional financial analyst AI assistant. Summarize each chunk accordingly."
+        "You are a professional financial analyst AI assistant."
+        " You summarize earnings call transcripts into financial highlights, operational highlights, forward guidance, sentiment analysis, and an executive summary."
+        " Each section must be very concise, bullet-pointed, and professional, formatted clearly for Slack posts."
     )
+
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+
+    chunks = split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST)
+    print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
     combined_summary = ""
 
@@ -115,31 +101,27 @@ def summarize_chunks(chunks):
                 retries += 1
             except Exception as e:
                 print(f"Warning: Error summarizing chunk {idx+1}: {e}")
+                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
                 break
 
     return combined_summary.strip()
 
-def summarize_combined_summary(combined_summary_text):
-    system_prompt = (
-        "You have received multiple partial summaries of an earnings call. "
-        "Please now combine them into one single cohesive and clean Slack-ready summary."
-    )
-    client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+def format_for_slack(summary_text):
+    formatted = summary_text
+    formatted = formatted.replace("Key Financial Highlights:", "\ud83d\udcca *Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "\ud83c\udfe2 *Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "\ud83d\udd2e *Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "\ud83d\udcca *Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "\ud83d\udd39 *Executive Summary:*")
+    formatted = formatted.replace("\n\n", "\n")
+    formatted = formatted.strip()
+    return formatted
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": combined_summary_text}
-            ],
-            temperature=0.2
-        )
-        final_summary = response.choices[0].message.content
-        return final_summary.strip()
-    except Exception as e:
-        print(f"Warning: Error during final summarization: {e}")
-        return combined_summary_text
+def send_to_slack(message):
+    payload = {"text": message}
+    response = requests.post(SLACK_WEBHOOK_URL, json=payload)
+    if response.status_code != 200:
+        raise Exception(f"Request to Slack returned error {response.status_code}, response: {response.text}")
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -200,15 +182,13 @@ def webhook():
 
         is_summarizing = True
         print("Summarizing file...")
-
-        chunks = split_into_token_chunks(file_contents)
-        combined_summary = summarize_chunks(chunks)
-        final_summary = summarize_combined_summary(combined_summary)
-
-        slack_message = format_for_slack(final_summary)
-        send_to_slack(slack_message)
-
+        summary = summarize_text(file_contents)
+        formatted_summary = format_for_slack(summary)
+        send_to_slack(formatted_summary)
         is_summarizing = False
+
+        print("\nSUMMARY SENT TO SLACK:")
+        print(formatted_summary)
 
     except Exception as e:
         is_summarizing = False
