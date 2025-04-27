@@ -65,12 +65,24 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def format_for_slack(summary_text):
+    # Replace "### Heading" patterns
     formatted = summary_text
-    formatted = formatted.replace("Financial Highlights:", "📊 *Financial Highlights*")
-    formatted = formatted.replace("Operational Highlights:", "🏢 *Operational Highlights*")
-    formatted = formatted.replace("Forward Guidance:", "🔮 *Forward Guidance*")
-    formatted = formatted.replace("Sentiment Analysis:", "📈 *Sentiment Analysis*")
+
+    # Remove markdown '###' headers if they exist and replace them with emojis + bold
+    formatted = re.sub(r'###\s*Financial Highlights', "📊 *Financial Highlights*", formatted)
+    formatted = re.sub(r'###\s*Operational Highlights', "🏢 *Operational Highlights*", formatted)
+    formatted = re.sub(r'###\s*Forward Guidance', "🔮 *Forward Guidance*", formatted)
+    formatted = re.sub(r'###\s*Sentiment Analysis', "📈 *Sentiment Analysis*", formatted)
+
+    # If any "**text**" is still left, replace it with "*text*"
+    formatted = re.sub(r'\*\*(.*?)\*\*', r'*\1*', formatted)
+
+    # Replace leading hyphens "-" with a round bullet "•"
+    formatted = re.sub(r'^\s*-\s*', "• ", formatted, flags=re.MULTILINE)
+
+    # Collapse multiple newlines into single
     formatted = re.sub(r'\n\n+', '\n', formatted)
+
     return formatted.strip()
 
 def send_to_slack(message_text):
