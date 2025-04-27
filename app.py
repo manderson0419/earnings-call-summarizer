@@ -15,8 +15,8 @@ from googleapiclient.http import MediaIoBaseDownload
 app = Flask(__name__)
 
 openai.api_key = os.environ['OPENAI_API_KEY']
-SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
+SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
 
 is_summarizing = False
 TOKEN_LIMIT_PER_REQUEST = 9000
@@ -49,21 +49,10 @@ def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
     return chunks
 
 def clean_text(text):
-    text = re.sub(r'\n+', '\n', text)  # Collapse multiple newlines
-    text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r'\s+', ' ', text)
     text = text.replace(' \n', '\n').replace('\n ', '\n')
     return text.strip()
-
-def format_for_slack(summary_text):
-    formatted = summary_text
-    formatted = formatted.replace("Key Financial Highlights:", "\n:moneybag: *Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "\n:factory: *Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "\n:crystal_ball: *Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "\n:bar_chart: *Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "\n:small_blue_diamond: *Executive Summary:*")
-    formatted = formatted.strip()
-    formatted += "\n---"
-    return formatted
 
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
@@ -73,34 +62,62 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
-def send_to_slack(message):
-    payload = {"text": message}
-    response = requests.post(SLACK_WEBHOOK_URL, json=payload)
-    if response.status_code != 200:
-        print(f"Warning: Slack API returned {response.status_code}: {response.text}")
+def format_for_slack(summary_text):
+    formatted = summary_text
+    formatted = formatted.replace("Key Financial Highlights:", "*\ud83d\udcca Key Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "*\ud83c\udfe2 Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "*\ud83d\udd2e Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "*\ud83d\udcc8 Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "*\ud83d\udd39 Executive Summary:*")
+    formatted = formatted.replace("\n\n", "\n")
+    formatted = formatted.strip()
+    formatted = f"---\n{formatted}\n---"
+    return formatted
+
+def post_to_slack(message):
+    if SLACK_WEBHOOK_URL:
+        response = requests.post(SLACK_WEBHOOK_URL, json={"text": message})
+        if response.status_code != 200:
+            print(f"Slack post failed: {response.status_code}, {response.text}")
+        else:
+            print("Slack post successful!")
     else:
-        print("Slack message sent successfully!")
+        print("Slack Webhook URL not set.")
 
 def summarize_text(text):
-    system_prompt = (
-        "You are a professional financial analyst AI assistant. "
-        "You will be provided an earnings call transcript or a section of one. "
-        "Extract:
-        - Financial Highlights
-        - Operational Highlights
-        - Forward Guidance
-        - Sentiment Analysis
-        - Executive Summary
+    system_prompt = """
+    You are a professional financial analyst AI assistant.
+    You take earnings call transcripts as input and generate:
+    - Key Financial Highlights
+    - Operational Highlights
+    - Forward Guidance
+    - Sentiment Analysis
+    - Executive Summary
 
-        Use clear labels, Slack-ready markdown, and make it very succinct and professional."
-    )
+    Format the output for Slack:
+    - Use emojis like \ud83d\udcca, \ud83c\udfe2, \ud83d\udd2e, \ud83d\udcc8, \ud83d\udd39
+    - Use **bold** headers
+    - Separate sections with "---"
+    - Keep it clear, clean, and professional.
+
+    If key financial data is missing, say 'Data not available'.
+    Avoid making assumptions.
+
+    Extract:
+    - Revenue
+    - EPS
+    - ARR
+    - Free Cash Flow
+    - Notable customer metrics
+    - Executive sentiment and guidance
+    """
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
-    chunks = split_into_token_chunks(text)
+    chunks = split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST)
     print(f"Splitting into {len(chunks)} chunk(s) for summarization...")
 
-    partial_summaries = []
+    combined_summary = ""
 
     for idx, chunk in enumerate(chunks):
         print(f"Summarizing chunk {idx+1}/{len(chunks)}...")
@@ -115,11 +132,11 @@ def summarize_text(text):
                     ],
                     temperature=0.3
                 )
-                chunk_summary = response.choices[0].message.content.strip()
-                partial_summaries.append(chunk_summary)
+                chunk_summary = response.choices[0].message.content
+                combined_summary += f"\n\n{chunk_summary}"
                 break
             except openai.RateLimitError as e:
-                wait_time = 120
+                wait_time = 45
                 if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
                     wait_time = int(e.response.headers['Retry-After'])
                 print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
@@ -127,27 +144,10 @@ def summarize_text(text):
                 retries += 1
             except Exception as e:
                 print(f"Warning: Error summarizing chunk {idx+1}: {e}")
-                partial_summaries.append(f"Error summarizing part {idx+1}: {e}")
+                combined_summary += f"\n\nWarning: Error summarizing part {idx+1}: {e}"
                 break
 
-    print("Combining all chunk summaries into final synthesis...")
-
-    combined_summary_text = "\n\n".join(partial_summaries)
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a financial analyst assistant. Combine the following partial summaries into a final clean, Slack-ready earnings call summary with sections, emojis, and professional formatting."},
-                {"role": "user", "content": combined_summary_text}
-            ],
-            temperature=0.2
-        )
-        final_summary = response.choices[0].message.content.strip()
-        return final_summary
-    except Exception as e:
-        print(f"Warning: Error during final summarization: {e}")
-        return combined_summary_text
+    return combined_summary.strip()
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -164,6 +164,7 @@ def webhook():
         return '', 200
 
     print("Received a webhook notification.")
+    print("Request headers:", request.headers)
 
     service = get_drive_service()
 
@@ -209,8 +210,7 @@ def webhook():
         print("Summarizing file...")
         summary = summarize_text(file_contents)
         formatted_summary = format_for_slack(summary)
-
-        send_to_slack(formatted_summary)
+        post_to_slack(formatted_summary)
         is_summarizing = False
 
     except Exception as e:
