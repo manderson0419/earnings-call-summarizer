@@ -9,6 +9,7 @@ import tiktoken
 import time
 import json
 import re
+import requests
 from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
@@ -17,7 +18,6 @@ openai.api_key = os.environ['OPENAI_API_KEY']
 FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
 is_summarizing = False
-
 TOKEN_LIMIT_PER_REQUEST = 9000
 
 # Set up tokenizer
@@ -48,10 +48,36 @@ def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
     return chunks
 
 def clean_text(text):
-    text = re.sub(r'\n+', '\n', text)  # Collapse multiple newlines
-    text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r'\s+', ' ', text)
     text = text.replace(' \n', '\n').replace('\n ', '\n')
     return text.strip()
+
+def format_for_slack(summary_text):
+    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
+    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
+    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
+    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
+    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
+    formatted = formatted.replace("\n\n", "\n")
+    return formatted.strip()
+
+def send_to_slack(message):
+    webhook_url = os.environ.get('SLACK_WEBHOOK_URL')
+    if not webhook_url:
+        print("Warning: No SLACK_WEBHOOK_URL found in environment variables.")
+        return
+
+    payload = {"text": message}
+
+    try:
+        response = requests.post(webhook_url, json=payload)
+        if response.status_code != 200:
+            print(f"Slack webhook error: {response.status_code} - {response.text}")
+        else:
+            print("✅ Successfully sent summary to Slack!")
+    except Exception as e:
+        print(f"Error sending to Slack: {e}")
 
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
@@ -109,23 +135,6 @@ def summarize_text(text):
                 break
 
     return combined_summary.strip()
-
-def format_for_slack(summary_text):
-    """
-    Cleans and formats the generated summary to look great when posted to Slack.
-    """
-    # Replace section headings with bold
-    formatted = summary_text.replace("Key Financial Highlights:", "*Key Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "*Key Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "*Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "*Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "*Executive Summary:*")
-    
-    # Optional: Replace other minor cleanups
-    formatted = formatted.replace("\n\n", "\n")  # remove double newlines
-    formatted = formatted.strip()
-
-    return formatted
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -189,8 +198,12 @@ def webhook():
         summary = summarize_text(file_contents)
         is_summarizing = False
 
-        print("\nSUMMARY (Ready for Slack):")
-        print(format_for_slack(summary))
+        formatted_summary = format_for_slack(summary)
+
+        print("\nFormatted SUMMARY (Ready for Slack):")
+        print(formatted_summary)
+
+        send_to_slack(formatted_summary)
 
     except Exception as e:
         is_summarizing = False
