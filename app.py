@@ -21,6 +21,7 @@ FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 is_summarizing = False
 TOKEN_LIMIT_PER_REQUEST = 9000
 
+# Set up tokenizer
 tokenizer = tiktoken.encoding_for_model("gpt-4o")
 
 def count_tokens(text):
@@ -65,12 +66,12 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def format_for_slack(summary_text):
-    formatted = summary_text.replace("Key Financial Highlights:", "\ud83d\udcc8 *Key Financial Highlights:*")
-    formatted = formatted.replace("Key Operational Highlights:", "\ud83d\udc69\u200d\ud83d\udcbc *Key Operational Highlights:*")
-    formatted = formatted.replace("Forward Guidance:", "\ud83d\udd2e *Forward Guidance:*")
-    formatted = formatted.replace("Sentiment Analysis:", "\ud83d\udcca *Sentiment Analysis:*")
-    formatted = formatted.replace("Executive Summary:", "\ud83d\udcd3 *Executive Summary:*")
-    formatted = formatted.replace("\n\n", "\n")
+    formatted = summary_text
+    formatted = formatted.replace("Financial Highlights:", "\ud83d\udcca *Financial Highlights*")
+    formatted = formatted.replace("Operational Highlights:", "\ud83c\udfe2 *Operational Highlights*")
+    formatted = formatted.replace("Forward Guidance:", "\ud83d\udd2e *Forward Guidance*")
+    formatted = formatted.replace("Sentiment Analysis:", "\ud83d\udcc8 *Sentiment Analysis*")
+    formatted = re.sub(r'\n\n+', '\n', formatted)  # collapse extra newlines
     return formatted.strip()
 
 def send_to_slack(message_text):
@@ -86,7 +87,13 @@ def send_to_slack(message_text):
 
 def summarize_chunks(chunks):
     system_prompt = (
-        "You are a professional financial analyst AI assistant. Summarize each chunk accordingly."
+        "You are a professional financial analyst AI assistant."
+        " Summarize each chunk of the earnings call into structured bullet points under the following sections:"
+        " Financial Highlights, Operational Highlights, Forward Guidance, Sentiment Analysis."
+        " Use clear bullet points, professional language, and avoid duplicating sections."
+        " Do NOT create an 'Executive Summary'."
+        " Maintain simple bullet points with no extra asterisks inside the bullets."
+        " Format cleanly for Slack posts."
     )
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
@@ -123,18 +130,12 @@ def summarize_chunks(chunks):
 
 def summarize_combined_summary(combined_summary_text):
     system_prompt = (
-        "You are a professional financial analyst AI assistant.\n"
-        "You have received multiple partial summaries of an earnings call.\n"
-        "Your task is to combine them into a single cohesive final summary.\n\n"
-        "The final output must be:\n"
-        "- Structured into the following sections: Financial Highlights, Operational Highlights, Forward Guidance, Sentiment Analysis, Executive Summary.\n"
-        "- Each section must have concise bullet points (each under 20 words).\n"
-        "- Section titles must be bolded.\n"
-        "- Important metrics like Revenue, EPS, ARR should be bolded.\n"
-        "- Keep Slack-friendly formatting (no giant paragraphs, use bullets).\n"
-        "- Maintain a professional tone for executive audiences.\n"
-        "- If financial data is missing, say 'Data not available'.\n"
-        "Here is the text to combine and clean up:"
+        "You have received multiple partial summaries of an earnings call."
+        " Combine them into ONE final clean Slack-ready summary with sections:"
+        " Financial Highlights, Operational Highlights, Forward Guidance, Sentiment Analysis."
+        " Use bullet points and a clean Slack-ready format."
+        " Do NOT create an 'Executive Summary'."
+        " Be structured, simple, and clear."
     )
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
