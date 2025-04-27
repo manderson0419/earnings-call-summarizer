@@ -8,6 +8,7 @@ import fitz  # PyMuPDF
 import tiktoken
 import time
 import json
+import re
 from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
@@ -17,7 +18,7 @@ FOLDER_ID = '1VsWkYlSJSFWHRK6u66qKhUn9xqajMPd6'
 
 is_summarizing = False
 
-TOKEN_LIMIT_PER_REQUEST = 9000  # safe chunk size
+TOKEN_LIMIT_PER_REQUEST = 9000
 
 # Set up tokenizer
 tokenizer = tiktoken.encoding_for_model("gpt-4o")
@@ -46,6 +47,12 @@ def split_into_token_chunks(text, max_tokens=TOKEN_LIMIT_PER_REQUEST):
 
     return chunks
 
+def clean_text(text):
+    text = re.sub(r'\n+', '\n', text)  # Collapse multiple newlines
+    text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces
+    text = text.replace(' \n', '\n').replace('\n ', '\n')
+    return text.strip()
+
 def get_drive_service():
     credentials_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
     creds = service_account.Credentials.from_service_account_info(
@@ -56,23 +63,14 @@ def get_drive_service():
 
 def summarize_text(text):
     system_prompt = (
-        "You are a professional financial analyst AI assistant. "
-        "You take earnings call transcripts as input, process the content, and generate:\n"
-        "- Key Financial Highlights (bullet points)\n"
-        "- Key Operational Highlights (bullet points)\n"
-        "- Forward Guidance (bullet points)\n"
-        "- Sentiment Analysis (bullet points)\n"
-        "- A concise executive Summary\n\n"
-        "Format the output cleanly. Financial summaries must:\n"
-        "- Be in 2 to 6 concise bullet points under 20 words each\n"
-        "- Highlight Revenue, EPS, and notable financial announcements when available\n"
-        "- Use clear labels (e.g., 'Revenue:', 'EPS:')\n"
-        "- Avoid assuming missing data; say 'Data not available' if needed\n"
-        "- Prepare the output as a Slack-compatible message (markdown-friendly)\n"
-        "- Maintain a professional tone for finance teams and executives\n"
-        "- Handle inconsistent transcript formats gracefully\n"
-        "- Clearly distinguish between quantitative data and qualitative sentiment\n\n"
-        "Process the following transcript and output accordingly:\n\n"
+        "This GPT takes earnings call transcripts as input, processes the content to extract and generate key financial highlights, operational highlights, forward guidance, sentiment analysis, and a concise summary. "
+        "It must prepare a Slack-compatible message format to send the summaries to a designated Slack channel. "
+        "Summaries must be accurate, succinct, and formatted clearly for quick consumption by finance teams or executives.\n\n"
+        "Financial summaries must be written in 2 to 6 concise bullet points, each under 20 words. Key metrics such as revenue, earnings per share (EPS), and notable financial announcements must be included where available.\n"
+        "Use a format like:\n- Revenue: Increased by 15% year-over-year, reaching $5 million\n- EPS: Reported earnings per share of $1.25, exceeding analysts expectations\n- Announcement: New partnership expected to drive future growth\n\n"
+        "Avoid overly technical financial jargon unless present in the original text. Clearly distinguish between quantitative data and qualitative sentiment, labeling sections properly."
+        "When data is missing or ambiguous, indicate that rather than assume."
+        "Use professional, clear, and concise language in summaries, appropriate for finance and executive audiences."
     )
 
     client = openai.OpenAI(api_key=os.environ['OPENAI_API_KEY'])
@@ -97,9 +95,9 @@ def summarize_text(text):
                 )
                 chunk_summary = response.choices[0].message.content
                 combined_summary += f"\n\n{chunk_summary}"
-                break  # Success, break retry loop
+                break
             except openai.RateLimitError as e:
-                wait_time = 45  # default wait time
+                wait_time = 45
                 if hasattr(e, 'response') and e.response and 'Retry-After' in e.response.headers:
                     wait_time = int(e.response.headers['Retry-After'])
                 print(f"Rate limit error (retry {retries+1}). Waiting {wait_time} seconds...")
@@ -166,7 +164,8 @@ def webhook():
             with open(file_name, 'r', encoding='utf-8') as f:
                 file_contents = f.read()
 
-        print(f"Text length: {len(file_contents)} characters")
+        file_contents = clean_text(file_contents)
+        print(f"Text length after cleaning: {len(file_contents)} characters")
 
         is_summarizing = True
         print("Summarizing file...")
@@ -184,4 +183,3 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
-
